@@ -20,14 +20,23 @@ import akshare as ak
 
 INTERVAL_VT2RQ: Dict[Interval, str] = {
     Interval.MINUTE: "1",
+    Interval.HOUR: "60",
     Interval.DAILY: "daily",
     Interval.WEEKLY: "weekly",
+}
+
+INTERVAL_DELTA_MAP = {
+    Interval.MINUTE: timedelta(minutes=1),
+    Interval.HOUR: timedelta(hours=1),
+    Interval.DAILY: timedelta(days=1),
+    Interval.WEEKLY: timedelta(days=7)
 }
 
 INTERVAL_ADJUSTMENT_MAP: Dict[Interval, timedelta] = {
     Interval.MINUTE: timedelta(minutes=1),
     Interval.HOUR: timedelta(hours=1),
-    Interval.DAILY: timedelta(hours=-15)         # no need to adjust for daily bar
+    Interval.DAILY: timedelta(hours=-15),
+    Interval.WEEKLY: timedelta(days=0)
 }
 
 CHINA_TZ = timezone("Asia/Shanghai")
@@ -150,34 +159,55 @@ class ZhADataFeed(BaseFeed):
         if interval is None:
             interval = Interval.DAILY
 
-        if interval == Interval.MINUTE:
-            period = INTERVAL_VT2RQ[interval]  # 返回5分钟数据
-            df = ak.stock_zh_a_hist_min_em(symbol, date_to_string(start), date_to_string(end), period, "hfq")
-            df.rename(columns={
-                '时间': "datetime",
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'volume',
-                '成交额': 'turnover',
-            }, inplace=True)
-            return df
+        if interval in [Interval.MINUTE, Interval.HOUR]:  # Handle both minute and hour intervals
+            period = INTERVAL_VT2RQ[interval]
+            try:
+                # Monkey patch the pandas datetime conversion temporarily
+                original_to_datetime = pd.to_datetime
+                pd.to_datetime = lambda *args, **kwargs: args[0]
+                
+                try:
+                    df = ak.stock_zh_a_hist_min_em(symbol, date_to_string(start), date_to_string(end), period, "hfq")
+                finally:
+                    # Restore original pd.to_datetime
+                    pd.to_datetime = original_to_datetime
+                
+                # Now convert datetime properly
+                df['时间'] = pd.to_datetime(df['时间'], format='%Y-%m-%d %H:%M')
+                df.rename(columns={
+                    '时间': "datetime",
+                    '开盘': 'open',
+                    '收盘': 'close',
+                    '最高': 'high',
+                    '最低': 'low',
+                    '成交量': 'volume',
+                    '成交额': 'turnover',
+                }, inplace=True)
+                return df
+            except Exception as e:
+                output(f"Error querying minute/hour data: {str(e)}")
+                return pd.DataFrame()
         
         else:
             period = INTERVAL_VT2RQ[interval]
-            df = ak.stock_zh_a_hist(symbol, period, date_to_string(start), date_to_string(end), "hfq")
-            df.rename(columns={
-                '日期': "datetime",
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'volume',
-                '成交额': 'turnover',
-            }, inplace=True)
-
-            return df
+            try:
+                df = ak.stock_zh_a_hist(symbol, period, date_to_string(start), date_to_string(end), "hfq")
+                df.rename(columns={
+                    '日期': "datetime",
+                    '开盘': 'open',
+                    '收盘': 'close',
+                    '最高': 'high',
+                    '最低': 'low',
+                    '成交量': 'volume',
+                    '成交额': 'turnover',
+                }, inplace=True)
+                
+                # 确保datetime列被正确解析
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                return df
+            except Exception as e:
+                output(f"Error querying {interval} data: {str(e)}")
+                return pd.DataFrame()
 
     def query_tick_history(self, req: HistoryRequest, output: Callable = print) -> pd.DataFrame:
         symbol: str = req.symbol
