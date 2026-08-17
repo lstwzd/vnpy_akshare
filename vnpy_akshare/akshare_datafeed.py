@@ -152,7 +152,7 @@ class ZhADataFeed(BaseFeed):
 
         if interval == Interval.MINUTE:
             period = INTERVAL_VT2RQ[interval]  # 返回5分钟数据
-            df = ak.stock_zh_a_hist_min_em(symbol, date_to_string(start), date_to_string(end), period, "hfq")
+            df = ak.stock_zh_a_hist_min_em(symbol, date_to_string(start), date_to_string(end), period, "")
             df.rename(columns={
                 '时间': "datetime",
                 '开盘': 'open',
@@ -166,7 +166,7 @@ class ZhADataFeed(BaseFeed):
         
         else:
             period = INTERVAL_VT2RQ[interval]
-            df = ak.stock_zh_a_hist(symbol, period, date_to_string(start), date_to_string(end), "hfq")
+            df = ak.stock_zh_a_hist(symbol, period, date_to_string(start), date_to_string(end), "")
             df.rename(columns={
                 '日期': "datetime",
                 '开盘': 'open',
