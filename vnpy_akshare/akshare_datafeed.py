@@ -278,7 +278,10 @@ class ZhADataFeed(BaseFeed):
         for col in ("open", "high", "low", "close", "volume", "turnover"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df['datetime'] = pd.to_datetime(df['datetime'])
-        mask = (df['datetime'] >= start) & (df['datetime'] <= end)
+        # 起止为日精度字符串(YYYYMMDD)，解析为时间戳后比较，结束日含全天
+        start_ts: pd.Timestamp = pd.to_datetime(start)
+        end_ts: pd.Timestamp = pd.to_datetime(end) + pd.Timedelta(days=1)
+        mask = (df['datetime'] >= start_ts) & (df['datetime'] < end_ts)
         df['datetime'] = df['datetime'].astype(str)
         return df[mask]
 
