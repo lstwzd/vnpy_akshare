@@ -1,4 +1,5 @@
 import dataclasses
+import time
 from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Callable
@@ -31,6 +32,13 @@ INTERVAL_ADJUSTMENT_MAP: Dict[Interval, timedelta] = {
 }
 
 CHINA_TZ = timezone("Asia/Shanghai")
+
+# 新浪/腾讯K线需带交易所前缀，按vnpy交易所枚举取前缀
+EXCHANGE_PREFIX = {
+    Exchange.SSE: "sh",
+    Exchange.SZSE: "sz",
+    Exchange.BSE: "bj",
+}
 
 def date_to_datetime(dt: date) -> datetime:
     return datetime.strptime(str(dt), "%Y-%m-%d")
@@ -141,6 +149,16 @@ class ZhADataFeed(BaseFeed):
     '''
     股票数据
     '''
+    # 东财熔断状态（类级别：每次查询都会新建实例，需跨实例共享）
+    em_blocked: bool = False
+    em_fail_at: float = 0.0
+    em_probe_interval: float = 1800.0
+
+    @classmethod
+    def _em_available(cls) -> bool:
+        """东财未熔断或已过探测间隔时允许尝试"""
+        return not cls.em_blocked or time.time() - cls.em_fail_at >= cls.em_probe_interval
+
     def query_bar_history(self, req: HistoryRequest, output: Callable = print) -> pd.DataFrame:
         symbol: str = req.symbol
         interval: Interval = req.interval
@@ -150,34 +168,119 @@ class ZhADataFeed(BaseFeed):
         if interval is None:
             interval = Interval.DAILY
 
-        if interval == Interval.MINUTE:
-            period = INTERVAL_VT2RQ[interval]  # 返回5分钟数据
-            df = ak.stock_zh_a_hist_min_em(symbol, date_to_string(start), date_to_string(end), period, "")
-            df.rename(columns={
-                '时间': "datetime",
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'volume',
-                '成交额': 'turnover',
-            }, inplace=True)
-            return df
-        
-        else:
-            period = INTERVAL_VT2RQ[interval]
-            df = ak.stock_zh_a_hist(symbol, period, date_to_string(start), date_to_string(end), "")
-            df.rename(columns={
-                '日期': "datetime",
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'volume',
-                '成交额': 'turnover',
-            }, inplace=True)
+        prefixed_symbol = EXCHANGE_PREFIX.get(req.exchange, "") + symbol
 
+        if interval == Interval.MINUTE:
+            period = INTERVAL_VT2RQ[interval]
+            return self._query_minute_history(symbol, prefixed_symbol, period, start, end, output)
+
+        period = INTERVAL_VT2RQ[interval]
+        return self._query_daily_history(symbol, prefixed_symbol, period, start, end, output)
+
+    def _query_daily_history(self, symbol: str, prefixed_symbol: str, period: str,
+                             start: datetime, end: datetime,
+                             output: Callable = print) -> pd.DataFrame:
+        """日K线：东财→新浪→腾讯 三级回退，成交量统一为股"""
+        sources: List[tuple[str, Callable[..., DataFrame], tuple[str, ...]]] = [
+            ("新浪", self._fetch_daily_sina, (prefixed_symbol,)),
+            ("腾讯", self._fetch_daily_tx, (prefixed_symbol,)),
+        ]
+        if self._em_available():
+            sources.insert(0, ("东方财富", self._fetch_daily_em, (symbol,)))
+
+        for source_name, fetch_func, args in sources:
+            try:
+                df = fetch_func(*(args + (period, date_to_string(start), date_to_string(end))))
+                if source_name == "东方财富" and type(self).em_blocked:
+                    output("东方财富接口已恢复，恢复使用东方财富数据源")
+                    type(self).em_blocked = False
+                output(f"{symbol} 日K线来源：{source_name}")
+                return df
+            except OSError as ex:
+                output(f"{source_name}获取{symbol}日K线网络异常，尝试下一数据源：{ex!r}")
+                if source_name == "东方财富":
+                    type(self).em_blocked = True
+                    type(self).em_fail_at = time.time()
+            except Exception as ex:
+                output(f"{source_name}获取{symbol}日K线失败，尝试下一数据源：{ex!r}")
+
+        output(f"{symbol} 日K线全部数据源失败")
+        return pd.DataFrame()
+
+    def _query_minute_history(self, symbol: str, prefixed_symbol: str, period: str,
+                              start: datetime, end: datetime,
+                              output: Callable = print) -> pd.DataFrame:
+        """分钟K线：东财→新浪 两级回退，成交量统一为股"""
+        sources: List[tuple[str, Callable[..., DataFrame], tuple[str, ...]]] = [
+            ("新浪", self._fetch_minute_sina, (prefixed_symbol,)),
+        ]
+        if self._em_available():
+            sources.insert(0, ("东方财富", self._fetch_minute_em, (symbol,)))
+
+        for source_name, fetch_func, args in sources:
+            try:
+                df = fetch_func(*(args + (period, date_to_string(start), date_to_string(end))))
+                if source_name == "东方财富" and type(self).em_blocked:
+                    output("东方财富接口已恢复，恢复使用东方财富数据源")
+                    type(self).em_blocked = False
+                output(f"{symbol} 分钟K线来源：{source_name}")
+                return df
+            except OSError as ex:
+                output(f"{source_name}获取{symbol}分钟K线网络异常，尝试下一数据源：{ex!r}")
+                if source_name == "东方财富":
+                    type(self).em_blocked = True
+                    type(self).em_fail_at = time.time()
+            except Exception as ex:
+                output(f"{source_name}获取{symbol}分钟K线失败，尝试下一数据源：{ex!r}")
+
+        output(f"{symbol} 分钟K线全部数据源失败")
+        return pd.DataFrame()
+
+    def _fetch_daily_em(self, symbol: str, period: str, start: str, end: str) -> pd.DataFrame:
+        """东财日K线：成交量单位为手，统一归一化为股"""
+        df = ak.stock_zh_a_hist(symbol, period, start, end, "")
+        df['成交量'] = df['成交量'] * 100
+        df = df[['日期', '开盘', '收盘', '最高', '最低', '成交量', '成交额']]
+        return df.rename(columns={'日期': "datetime", '开盘': 'open', '收盘': 'close',
+                                  '最高': 'high', '最低': 'low', '成交量': 'volume',
+                                  '成交额': 'turnover'})
+
+    def _fetch_daily_sina(self, prefixed_symbol: str, period: str, start: str, end: str) -> pd.DataFrame:
+        """新浪日K线：成交量单位为股，无需转换"""
+        df = ak.stock_zh_a_daily(prefixed_symbol, start, end, "")
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+        return df.rename(columns={'date': "datetime", 'volume': 'volume', 'amount': 'turnover'})
+
+    def _fetch_daily_tx(self, prefixed_symbol: str, period: str, start: str, end: str) -> pd.DataFrame:
+        """腾讯日K线：akshare已统一为股，仅sz000前缀仍返回手需补转"""
+        df = ak.stock_zh_a_hist_tx(prefixed_symbol, start, end, "")
+        if prefixed_symbol.startswith("sz000"):
+            df['volume'] = df['volume'] * 100
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+        return df.rename(columns={'date': "datetime", 'volume': 'volume', 'amount': 'turnover'})
+
+    def _fetch_minute_em(self, symbol: str, period: str, start: str, end: str) -> pd.DataFrame:
+        """东财分钟K线：成交量单位为手，统一归一化为股"""
+        df = ak.stock_zh_a_hist_min_em(symbol, start, end, period, "")
+        df['成交量'] = df['成交量'] * 100
+        df = df[['时间', '开盘', '收盘', '最高', '最低', '成交量', '成交额']]
+        return df.rename(columns={'时间': "datetime", '开盘': 'open', '收盘': 'close',
+                                  '最高': 'high', '最低': 'low', '成交量': 'volume',
+                                  '成交额': 'turnover'})
+
+    def _fetch_minute_sina(self, prefixed_symbol: str, period: str, start: str, end: str) -> pd.DataFrame:
+        """新浪分钟K线：成交量单位为股，仅返回最近约1970根，需按起止过滤"""
+        df = ak.stock_zh_a_minute(prefixed_symbol, period=period, adjust="")
+        if df.empty:
             return df
+        df = df[['day', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+        df = df.rename(columns={'day': "datetime", 'volume': 'volume', 'amount': 'turnover'})
+        for col in ("open", "high", "low", "close", "volume", "turnover"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        mask = (df['datetime'] >= start) & (df['datetime'] <= end)
+        df['datetime'] = df['datetime'].astype(str)
+        return df[mask]
 
     def query_tick_history(self, req: HistoryRequest, output: Callable = print) -> pd.DataFrame:
         symbol: str = req.symbol
