@@ -54,12 +54,35 @@ def check_source(name: str, symbol: str, exchange: Exchange, start: datetime, en
     return False
 
 
+def check_imports():
+    import importlib
+
+    for name in ["vnpy_akshare", "vnpy_mootdx", "vnpy_baostock", "vnpy_efinance"]:
+        try:
+            mod = importlib.import_module(name)
+        except Exception as exc:
+            print(f"[{name}] import failed: {type(exc).__name__}: {exc}")
+            return False
+
+        datafeed = getattr(mod, "Datafeed", None)
+        print(f"[{name}] import ok, Datafeed={datafeed}")
+
+    from vnpy_akshare import get_datafeed
+    print(f"[akshare_factory] {get_datafeed('akshare')!r}")
+    print(f"[mootdx_factory] {get_datafeed('mootdx')!r}")
+    return True
+
+
 if __name__ == "__main__":
     now = datetime.now()
     start = datetime(2024, 1, 2)
     end = datetime(2024, 1, 5)
 
+    import_ok = check_imports()
+    print(f"module_import_status={'ok' if import_ok else 'fail'}")
+
     results = {
+        "akshare": check_source("akshare", "000001", Exchange.SSE, start, end),
         "baostock": check_source("baostock", "000001", Exchange.SSE, start, end),
         "mootdx": check_source("mootdx", "000001", Exchange.SSE, start, end),
         "efinance": check_source("efinance", "000001", Exchange.SSE, start, end),

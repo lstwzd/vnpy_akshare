@@ -47,16 +47,54 @@
 
 这些接口在未安装对应依赖时会优雅降级，并不会阻止模块导入。可按需安装：
 
-其中：
-
-- `MootdxDataFeed` 支持 `query_tick_history()`，可按 `TickData` 提供分笔成交/逐笔行情数据，适合 VNpy 的 Tick 查询。
-- `BaostockDataFeed` 与 `EfinanceDataFeed` 当前主要覆盖 K 线/日线数据，未提供稳定 Tick 适配。
-
 ```bash
 pip install "vnpy_akshare[mootdx]"
 pip install "vnpy_akshare[baostock]"
 pip install "vnpy_akshare[efinance]"
 ```
+
+### 当前环境真实验证结论
+
+在当前 `niffler` conda 环境下，已做真实抓数验证：
+
+- `akshare`：日线抓数正常
+- `baostock`：日线抓数正常
+- `mootdx`：当前环境缺少有效 TDX/数据服务配置，日线不返回数据；tick 数据可正常抓取
+- `efinance`：当前环境代理/网络受限，日线不返回数据；tick 接口未提供稳定实现
+
+也就是说，原始 AKShare 与 Baostock 在当前环境下可作为稳定的日线数据源；Mootdx 是环境依赖型数据源；eFinance 需要网络/代理条件满足才可用。
+
+### Tick 能力说明
+
+- `MootdxDataFeed` 支持 `query_tick_history()`，可按 `TickData` 提供分笔成交/逐笔行情数据，适合 VNpy 的 Tick 查询。
+- `BaostockDataFeed` 与 `EfinanceDataFeed` 当前主要覆盖 K 线/日线数据，未提供稳定 Tick 适配；如果对应库无稳定历史 tick API，适配层会明确返回空结果并输出状态说明，而不会导致模块崩溃。
+
+## 模块入口与 VeighNa 配置
+
+为了兼容 VeighNa 的标准 `datafeed.name` 加载方式，包额外提供了顶层入口模块：
+
+- `vnpy_akshare`
+- `vnpy_mootdx`
+- `vnpy_baostock`
+- `vnpy_efinance`
+
+对应的 `Datafeed` 类型分别为：
+
+- `akshare` -> `AKShareDataFeed`
+- `mootdx` -> `MootdxDataFeed`
+- `baostock` -> `BaostockDataFeed`
+- `efinance` -> `EfinanceDataFeed`
+
+可在 VeighNa 中按如下方式切换：
+
+```python
+SETTINGS['datafeed.name'] = 'akshare'
+SETTINGS['datafeed.name'] = 'mootdx'
+SETTINGS['datafeed.name'] = 'baostock'
+SETTINGS['datafeed.name'] = 'efinance'
+```
+
+如果当前环境缺少 TDX、代理网络或对应第三方依赖，接口会返回空结果并输出清晰状态信息，而不会在模块导入阶段直接崩溃。
 
 ## 安装
 
