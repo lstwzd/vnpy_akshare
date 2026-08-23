@@ -108,6 +108,7 @@ class OptionalSourceDatafeed(BaseDatafeed):
         if frame.empty:
             return []
 
+        interval = req.interval or Interval.DAILY
         bars: list[BarData] = []
         for row in frame.itertuples(index=False):
             dt = getattr(row, "datetime", None)
@@ -122,6 +123,19 @@ class OptionalSourceDatafeed(BaseDatafeed):
                 except Exception:
                     continue
 
+            if interval == Interval.DAILY and dt.time() == datetime.min.time():
+                dt = dt.replace(hour=15, minute=0, second=0, microsecond=0)
+                if dt.tzinfo is None:
+                    dt = CHINA_TZ.localize(dt)
+
+            if dt.tzinfo is None:
+                dt = CHINA_TZ.localize(dt)
+
+            volume = float(getattr(row, "volume", 0) or 0)
+            if interval == Interval.DAILY and req.exchange in {Exchange.SSE, Exchange.SZSE, Exchange.BSE}:
+                if volume >= 10_000_000_000 and volume % 100 == 0:
+                    volume /= 100.0
+
             try:
                 bar = BarData(
                     symbol=req.symbol,
@@ -132,7 +146,7 @@ class OptionalSourceDatafeed(BaseDatafeed):
                     high_price=float(getattr(row, "high", 0) or 0),
                     low_price=float(getattr(row, "low", 0) or 0),
                     close_price=float(getattr(row, "close", 0) or 0),
-                    volume=float(getattr(row, "volume", 0) or 0),
+                    volume=volume,
                     turnover=float(getattr(row, "turnover", 0) or 0),
                     gateway_name=self.source_name.upper(),
                 )
@@ -161,6 +175,29 @@ class MootdxDataFeed(OptionalSourceDatafeed):
     package_name = "mootdx"
     source_name = "Mootdx"
 
+    def _fetch_daily_bars(self, quote_client: Any, symbol: str, begin: str, end: str) -> pd.DataFrame:
+        """Fetch daily bars with a compatibility fallback for current mootdx releases."""
+        try:
+            return quote_client.k(symbol=symbol, begin=begin, end=end)
+        except KeyError as exc:
+            if "datetime" not in str(exc):
+                raise
+
+            raw_client = getattr(quote_client, "client", None)
+            if raw_client is None:
+                raise
+
+            from mootdx.utils import get_stock_market
+            market = get_stock_market(symbol, string=False)
+            raw_data = raw_client.get_security_bars(9, market, symbol, 0, 800)
+            if raw_data is None:
+                raise ValueError("Mootdx raw TDX bar API returned no data")
+
+            df = raw_client.to_df(raw_data)
+            if df is None or getattr(df, "empty", False):
+                raise ValueError("Mootdx raw TDX bar API returned empty data")
+            return df
+
     def query_bar_history(self, req: HistoryRequest, output: Callable = print) -> list[BarData]:
         if not self.inited and not self.init(output):
             return []
@@ -176,7 +213,7 @@ class MootdxDataFeed(OptionalSourceDatafeed):
             quote_client = quote_cls()
             start_str = req.start.strftime("%Y%m%d")
             end_str = (req.end or datetime.now()).strftime("%Y%m%d")
-            df = quote_client.k(symbol=req.symbol, begin=start_str, end=end_str)
+            df = self._fetch_daily_bars(quote_client, req.symbol, start_str, end_str)
             if df is None:
                 output(f"Mootdx查询{req.symbol}返回空结果，当前环境可能未配置有效的 TDX 服务器或股票代码")
                 return []
@@ -191,7 +228,7 @@ class MootdxDataFeed(OptionalSourceDatafeed):
                 return []
             return self._convert_df_to_bars(req, df, output)
         except Exception as exc:
-            output(f"Mootdx查询{req.symbol}失败: {exc!r}")
+            output(f"Mootdx查询{req.symbol}失败: 当前环境未配置有效的 TDX 服务器或该股票代码无数据 ({type(exc).__name__}: {exc})")
             return []
 
     def query_tick_history(self, req: HistoryRequest, output: Callable = print) -> list[TickData]:
