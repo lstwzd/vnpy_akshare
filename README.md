@@ -35,6 +35,28 @@
 2. 支持基金数据，但需要采用安装修改版[**akshare**](https://github.com/lstwzd/akshare)
 3. 支持日线级别数据，tick级别不支持
 4. akshare数据源采用证券网站抓取，影响可能存在较慢的问题。
+5. 除默认的 akshare 接口外，也预留了 Mootdx、Baostock、eFinance 三类可选数据源入口，便于在不同环境下切换数据源实现。
+
+## 扩展数据源接口
+
+当前包默认导出 `AKShareDataFeed` 作为 VeighNa 的 `Datafeed`，同时额外提供：
+
+- `MootdxDataFeed`
+- `BaostockDataFeed`
+- `EfinanceDataFeed`
+
+这些接口在未安装对应依赖时会优雅降级，并不会阻止模块导入。可按需安装：
+
+其中：
+
+- `MootdxDataFeed` 支持 `query_tick_history()`，可按 `TickData` 提供分笔成交/逐笔行情数据，适合 VNpy 的 Tick 查询。
+- `BaostockDataFeed` 与 `EfinanceDataFeed` 当前主要覆盖 K 线/日线数据，未提供稳定 Tick 适配。
+
+```bash
+pip install "vnpy_akshare[mootdx]"
+pip install "vnpy_akshare[baostock]"
+pip install "vnpy_akshare[efinance]"
+```
 
 ## 安装
 

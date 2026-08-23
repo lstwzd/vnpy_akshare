@@ -23,10 +23,35 @@
 
 import importlib_metadata
 
-from .akshare_datafeed import AKShareDataFeed as Datafeed
+from .akshare_datafeed import AKShareDataFeed
+from .datafeed_sources import (
+    BaostockDataFeed,
+    BaostockDatafeed,
+    EfinanceDataFeed,
+    EfinanceDatafeed,
+    MootdxDataFeed,
+    MootdxDatafeed,
+    DATAFEED_MAP,
+    get_datafeed,
+)
 
+Datafeed = AKShareDataFeed
 
 try:
     __version__ = importlib_metadata.version("vnpy_akshare")
 except importlib_metadata.PackageNotFoundError:
     __version__ = "dev"
+
+__all__ = [
+    "AKShareDataFeed",
+    "Datafeed",
+    "MootdxDataFeed",
+    "MootdxDatafeed",
+    "BaostockDataFeed",
+    "BaostockDatafeed",
+    "EfinanceDataFeed",
+    "EfinanceDatafeed",
+    "get_datafeed",
+    "DATAFEED_MAP",
+    "__version__",
+]
