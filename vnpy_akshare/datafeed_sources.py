@@ -1,4 +1,6 @@
+import atexit
 import importlib
+import threading
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -11,6 +13,29 @@ from vnpy.trader.datafeed import BaseDatafeed
 from vnpy.trader.object import BarData, HistoryRequest, TickData
 
 CHINA_TZ = timezone("Asia/Shanghai")
+
+# baostock 库内部为模块级全局 socket(conx.default_socket)，跨线程并发不安全：
+# 这里用模块级锁把所有 login/query/logout 串行化，并复用登录连接(login 一次多次查询)。
+_BAOSTOCK_LOCK = threading.Lock()
+_baostock_logged_in = False
+
+
+def _baostock_logout_atexit() -> None:
+    """进程退出时关闭 baostock 全局连接，避免残留 socket。"""
+    global _baostock_logged_in
+    if not _baostock_logged_in:
+        return
+    try:
+        import baostock
+
+        baostock.logout()
+    except Exception:
+        pass
+    finally:
+        _baostock_logged_in = False
+
+
+atexit.register(_baostock_logout_atexit)
 
 
 class OptionalSourceDatafeed(BaseDatafeed):
@@ -321,51 +346,50 @@ class BaostockDataFeed(OptionalSourceDatafeed):
         if not self.inited and not self.init(output):
             return []
 
-        try:
-            frequency = self._map_interval(req.interval)
-            code = req.symbol
-            if req.exchange in {Exchange.SSE, Exchange.SZSE, Exchange.BSE}:
-                prefix = {Exchange.SSE: "sh.", Exchange.SZSE: "sz.", Exchange.BSE: "bj."}.get(req.exchange, "")
-                code = f"{prefix}{req.symbol}"
+        global _baostock_logged_in
+        with _BAOSTOCK_LOCK:
+            try:
+                frequency = self._map_interval(req.interval)
+                code = req.symbol
+                if req.exchange in {Exchange.SSE, Exchange.SZSE, Exchange.BSE}:
+                    prefix = {Exchange.SSE: "sh.", Exchange.SZSE: "sz.", Exchange.BSE: "bj."}.get(req.exchange, "")
+                    code = f"{prefix}{req.symbol}"
 
-            start_str = req.start.strftime("%Y-%m-%d")
-            end_str = (req.end or datetime.now()).strftime("%Y-%m-%d")
-            fields = "date,open,high,low,close,volume,amount"
-            login_res = self.module.login() if hasattr(self.module, "login") else None
-            if login_res is not None:
-                error_code = getattr(login_res, "error_code", None)
-                if error_code not in (None, "0", 0):
-                    output(f"Baostock登录失败: {login_res!r}")
+                start_str = req.start.strftime("%Y-%m-%d")
+                end_str = (req.end or datetime.now()).strftime("%Y-%m-%d")
+                fields = "date,open,high,low,close,volume,amount"
+
+                if not _baostock_logged_in:
+                    login_res = self.module.login() if hasattr(self.module, "login") else None
+                    if login_res is not None:
+                        error_code = getattr(login_res, "error_code", None)
+                        if error_code not in (None, "0", 0):
+                            output(f"Baostock登录失败: {login_res!r}")
+                            return []
+                    _baostock_logged_in = True
+
+                result = self.module.query_history_k_data_plus(
+                    code=code,
+                    fields=fields,
+                    start_date=start_str,
+                    end_date=end_str,
+                    frequency=frequency,
+                    adjustflag="3",
+                )
+                if hasattr(result, "get_data"):
+                    df = result.get_data()
+                else:
+                    df = result
+
+                if hasattr(result, "error_code") and str(getattr(result, "error_code", "0")) not in {"0", "00"}:
+                    output(f"Baostock查询{req.symbol}失败: {result.error_code} {getattr(result, 'error_msg', '')}")
                     return []
 
-            result = self.module.query_history_k_data_plus(
-                code=code,
-                fields=fields,
-                start_date=start_str,
-                end_date=end_str,
-                frequency=frequency,
-                adjustflag="3",
-            )
-            if hasattr(result, "get_data"):
-                df = result.get_data()
-            else:
-                df = result
-
-            if hasattr(result, "error_code") and str(getattr(result, "error_code", "0")) not in {"0", "00"}:
-                output(f"Baostock查询{req.symbol}失败: {result.error_code} {getattr(result, 'error_msg', '')}")
+                return self._convert_df_to_bars(req, df, output)
+            except Exception as exc:
+                _baostock_logged_in = False
+                output(f"Baostock查询{req.symbol}失败: {exc!r}")
                 return []
-
-            if hasattr(self.module, "logout"):
-                self.module.logout()
-            return self._convert_df_to_bars(req, df, output)
-        except Exception as exc:
-            if hasattr(self.module, "logout"):
-                try:
-                    self.module.logout()
-                except Exception:
-                    pass
-            output(f"Baostock查询{req.symbol}失败: {exc!r}")
-            return []
 
     @staticmethod
     def _map_interval(interval: Optional[Interval]) -> str:
